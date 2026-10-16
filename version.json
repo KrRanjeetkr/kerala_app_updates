@@ -1,7 +1,4 @@
 {
-  "versionCode": 25,
-  "versionName": "2.5",
-  "apkUrl": "https://github.com/KrRanjeetkr/kerala_app_updates/releases/download/v1.1/app-release.apk",
-  "forceUpdate": true,
-  "message": "New version available. Please update to continue using the app."
+  "version": "25",
+  "url": "https://github.com/KrRanjeetkr/kerala_app_updates/releases/download/v1.0.0/app-release.apk"
 }
