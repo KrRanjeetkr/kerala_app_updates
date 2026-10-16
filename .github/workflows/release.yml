@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# Prevents two runs from pushing at the same time
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
 jobs:
   update-and-release:
     runs-on: ubuntu-latest
@@ -19,46 +24,90 @@ jobs:
           persist-credentials: true
           ref: main
 
+      - name: Sync with latest main
+        run: git pull --rebase origin main
+
       - name: Bump Version
         id: versioning
         run: |
-          CURRENT_VCODE=$(jq -r '.versionCode' version.json)
-          CURRENT_VNAME=$(jq -r '.versionName' version.json)
-          
+          CURRENT_VCODE=$(jq -r '.versionCode // 0' version.json)
+          CURRENT_VNAME=$(jq -r '.versionName // "1.0"' version.json)
+
+          # versionCode must be a number
+          if ! [[ "$CURRENT_VCODE" =~ ^[0-9]+$ ]]; then
+            echo "Invalid versionCode '$CURRENT_VCODE', resetting to 0"
+            CURRENT_VCODE=0
+          fi
           NEW_VCODE=$((CURRENT_VCODE + 1))
-          
-          IFS='.' read -r -a parts <<< "$CURRENT_VNAME"
+
+          # Clean versionName: drop empty/non-numeric parts (fixes "25..1")
+          IFS='.' read -r -a raw <<< "$CURRENT_VNAME"
+          parts=()
+          for p in "${raw[@]}"; do
+            [[ "$p" =~ ^[0-9]+$ ]] && parts+=("$p")
+          done
+          [ ${#parts[@]} -eq 0 ] && parts=(1 0)
+          [ ${#parts[@]} -eq 1 ] && parts+=(0)
+
           last_index=$((${#parts[@]} - 1))
           parts[$last_index]=$((parts[$last_index] + 1))
           NEW_VNAME=$(IFS='.'; echo "${parts[*]}")
-          
-          echo "NEW_VCODE=$NEW_VCODE" >> $GITHUB_ENV
-          echo "NEW_VNAME=$NEW_VNAME" >> $GITHUB_ENV
+
+          # Skip forward if this tag already exists
+          git fetch --tags --force
+          while git rev-parse "v$NEW_VNAME" >/dev/null 2>&1; do
+            echo "Tag v$NEW_VNAME already exists, bumping again"
+            parts[$last_index]=$((parts[$last_index] + 1))
+            NEW_VNAME=$(IFS='.'; echo "${parts[*]}")
+          done
+
+          echo "Old: $CURRENT_VNAME ($CURRENT_VCODE)  ->  New: $NEW_VNAME ($NEW_VCODE)"
+          echo "NEW_VCODE=$NEW_VCODE" >> "$GITHUB_ENV"
+          echo "NEW_VNAME=$NEW_VNAME" >> "$GITHUB_ENV"
 
       - name: Update version.json
         run: |
-          DOWNLOAD_URL="https://github.com/KrRanjeetkr/kerala_app_updates/releases/download/v${{ env.NEW_VNAME }}/app-release.apk"
-          echo "{\"versionCode\": ${{ env.NEW_VCODE }}, \"versionName\": \"${{ env.NEW_VNAME }}\", \"url\": \"$DOWNLOAD_URL\"}" > version.json
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${NEW_VNAME}/app-release.apk"
+          jq -n \
+            --argjson code "$NEW_VCODE" \
+            --arg name "$NEW_VNAME" \
+            --arg url "$DOWNLOAD_URL" \
+            '{versionCode: $code, versionName: $name, url: $url}' > version.json
+          cat version.json
 
-      - name: Commit version.json
+      - name: Commit and push version.json
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add version.json
+
           if git diff --staged --quiet; then
             echo "No changes to commit"
-          else
-            git commit -m "Auto-update to versionCode ${{ env.NEW_VCODE }} and versionName ${{ env.NEW_VNAME }}"
-            git fetch origin main
-            git rebase origin/main
-            git push origin HEAD:main
+            exit 0
           fi
+
+          git commit -m "Auto-update to versionCode ${NEW_VCODE} and versionName ${NEW_VNAME}"
+
+          # Retry: if main moved, rebase on top of it and push again
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              echo "Pushed successfully"
+              exit 0
+            fi
+            echo "Push failed (attempt $i), retrying in 5s..."
+            git rebase --abort 2>/dev/null || true
+            sleep 5
+          done
+
+          echo "Push failed after 5 attempts"
+          exit 1
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.NEW_VNAME }}
           name: Release v${{ env.NEW_VNAME }}
+          target_commitish: main
           files: release/app-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
