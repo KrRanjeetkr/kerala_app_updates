@@ -8,9 +8,9 @@ on:
 permissions:
   contents: write
 
-# Prevents two runs from pushing at the same time
+# Only one release run at a time; a second one waits instead of racing
 concurrency:
-  group: auto-release
+  group: auto-release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -24,82 +24,76 @@ jobs:
           persist-credentials: true
           ref: main
 
-      - name: Sync with latest main
-        run: git pull --rebase origin main
-
-      - name: Bump Version
-        id: versioning
+      - name: Bump version, commit and push
         run: |
-          CURRENT_VCODE=$(jq -r '.versionCode // 0' version.json)
-          CURRENT_VNAME=$(jq -r '.versionName // "1.0"' version.json)
+          set -euo pipefail
 
-          # versionCode must be a number
-          if ! [[ "$CURRENT_VCODE" =~ ^[0-9]+$ ]]; then
-            echo "Invalid versionCode '$CURRENT_VCODE', resetting to 0"
-            CURRENT_VCODE=0
-          fi
-          NEW_VCODE=$((CURRENT_VCODE + 1))
-
-          # Clean versionName: drop empty/non-numeric parts (fixes "25..1")
-          IFS='.' read -r -a raw <<< "$CURRENT_VNAME"
-          parts=()
-          for p in "${raw[@]}"; do
-            [[ "$p" =~ ^[0-9]+$ ]] && parts+=("$p")
-          done
-          [ ${#parts[@]} -eq 0 ] && parts=(1 0)
-          [ ${#parts[@]} -eq 1 ] && parts+=(0)
-
-          last_index=$((${#parts[@]} - 1))
-          parts[$last_index]=$((parts[$last_index] + 1))
-          NEW_VNAME=$(IFS='.'; echo "${parts[*]}")
-
-          # Skip forward if this tag already exists
-          git fetch --tags --force
-          while git rev-parse "v$NEW_VNAME" >/dev/null 2>&1; do
-            echo "Tag v$NEW_VNAME already exists, bumping again"
-            parts[$last_index]=$((parts[$last_index] + 1))
-            NEW_VNAME=$(IFS='.'; echo "${parts[*]}")
-          done
-
-          echo "Old: $CURRENT_VNAME ($CURRENT_VCODE)  ->  New: $NEW_VNAME ($NEW_VCODE)"
-          echo "NEW_VCODE=$NEW_VCODE" >> "$GITHUB_ENV"
-          echo "NEW_VNAME=$NEW_VNAME" >> "$GITHUB_ENV"
-
-      - name: Update version.json
-        run: |
-          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${NEW_VNAME}/app-release.apk"
-          jq -n \
-            --argjson code "$NEW_VCODE" \
-            --arg name "$NEW_VNAME" \
-            --arg url "$DOWNLOAD_URL" \
-            '{versionCode: $code, versionName: $name, url: $url}' > version.json
-          cat version.json
-
-      - name: Commit and push version.json
-        run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add version.json
 
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
+          bump_version() {
+            CURRENT_VCODE=$(jq -r '.versionCode // 0' version.json 2>/dev/null || echo 0)
+            CURRENT_VNAME=$(jq -r '.versionName // "1.0"' version.json 2>/dev/null || echo "1.0")
 
-          git commit -m "Auto-update to versionCode ${NEW_VCODE} and versionName ${NEW_VNAME}"
+            if ! [[ "$CURRENT_VCODE" =~ ^[0-9]+$ ]]; then
+              CURRENT_VCODE=0
+            fi
+            NEW_VCODE=$((CURRENT_VCODE + 1))
 
-          # Retry: if main moved, rebase on top of it and push again
-          for i in 1 2 3 4 5; do
-            if git pull --rebase origin main && git push origin HEAD:main; then
+            # Keep only numeric parts (fixes values like "25..1" or "25.")
+            IFS='.' read -r -a raw <<< "$CURRENT_VNAME"
+            parts=()
+            for p in "${raw[@]}"; do
+              if [[ "$p" =~ ^[0-9]+$ ]]; then parts+=("$p"); fi
+            done
+            if [ ${#parts[@]} -eq 0 ]; then parts=(1 0); fi
+            if [ ${#parts[@]} -eq 1 ]; then parts+=(0); fi
+
+            last=$((${#parts[@]} - 1))
+            parts[$last]=$((parts[$last] + 1))
+            NEW_VNAME=$(IFS='.'; echo "${parts[*]}")
+
+            # Never reuse an existing tag
+            while git rev-parse -q --verify "refs/tags/v$NEW_VNAME" >/dev/null; do
+              parts[$last]=$((parts[$last] + 1))
+              NEW_VNAME=$(IFS='.'; echo "${parts[*]}")
+            done
+          }
+
+          for attempt in 1 2 3 4 5; do
+            echo "=== Attempt $attempt ==="
+
+            # Always start from the newest main, so the push can't be "behind"
+            git fetch origin main --tags --force
+            git reset --hard origin/main
+
+            bump_version
+            echo "Version: $CURRENT_VNAME ($CURRENT_VCODE) -> $NEW_VNAME ($NEW_VCODE)"
+
+            DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${NEW_VNAME}/app-release.apk"
+            jq -n \
+              --argjson code "$NEW_VCODE" \
+              --arg name "$NEW_VNAME" \
+              --arg url "$DOWNLOAD_URL" \
+              '{versionCode: $code, versionName: $name, url: $url}' > version.json
+            cat version.json
+
+            git add version.json
+            git commit -m "Auto-update to versionCode ${NEW_VCODE} and versionName ${NEW_VNAME}"
+
+            if git push origin HEAD:main; then
               echo "Pushed successfully"
+              echo "NEW_VCODE=$NEW_VCODE" >> "$GITHUB_ENV"
+              echo "NEW_VNAME=$NEW_VNAME" >> "$GITHUB_ENV"
+              echo "RELEASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
               exit 0
             fi
-            echo "Push failed (attempt $i), retrying in 5s..."
-            git rebase --abort 2>/dev/null || true
-            sleep 5
+
+            echo "Push rejected, main changed. Retrying in $((attempt * 5))s..."
+            sleep $((attempt * 5))
           done
 
-          echo "Push failed after 5 attempts"
+          echo "::error::Could not push after 5 attempts. Check for another workflow that also pushes to main."
           exit 1
 
       - name: Create Release
@@ -107,7 +101,7 @@ jobs:
         with:
           tag_name: v${{ env.NEW_VNAME }}
           name: Release v${{ env.NEW_VNAME }}
-          target_commitish: main
+          target_commitish: ${{ env.RELEASE_SHA }}
           files: release/app-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
