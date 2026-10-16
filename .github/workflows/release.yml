@@ -18,31 +18,43 @@ jobs:
       - name: Bump Version
         id: versioning
         run: |
-          CURRENT_VERSION=$(jq -r '.version' version.json)
-          IFS='.' read -r -a parts <<< "$CURRENT_VERSION"
+          # json se dono values read karein
+          CURRENT_VCODE=$(jq -r '.versionCode' version.json)
+          CURRENT_VNAME=$(jq -r '.versionName' version.json)
+          
+          # versionCode ko +1 karein (e.g., 57 -> 58)
+          NEW_VCODE=$((CURRENT_VCODE + 1))
+          
+          # versionName ko +1 karein (e.g., 6.7 -> 6.8)
+          IFS='.' read -r -a parts <<< "$CURRENT_VNAME"
           last_index=$((${#parts[@]} - 1))
           parts[$last_index]=$((parts[$last_index] + 1))
-          NEW_VERSION=$(IFS='.'; echo "${parts[*]}")
-          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          NEW_VNAME=$(IFS='.'; echo "${parts[*]}")
+          
+          # Values ko aage ke steps ke liye save karein
+          echo "NEW_VCODE=$NEW_VCODE" >> $GITHUB_ENV
+          echo "NEW_VNAME=$NEW_VNAME" >> $GITHUB_ENV
 
       - name: Update version.json
         run: |
-          DOWNLOAD_URL="https://github.com/KrRanjeetkr/kerala_app_updates/releases/download/v${{ env.NEW_VERSION }}/app-release.apk"
-          echo "{\"version\": \"${{ env.NEW_VERSION }}\", \"url\": \"$DOWNLOAD_URL\"}" > version.json
+          DOWNLOAD_URL="https://github.com/KrRanjeetkr/kerala_app_updates/releases/download/v${{ env.NEW_VNAME }}/app-release.apk"
+          
+          # Naye JSON format ko save karein
+          echo "{\"versionCode\": ${{ env.NEW_VCODE }}, \"versionName\": \"${{ env.NEW_VNAME }}\", \"url\": \"$DOWNLOAD_URL\"}" > version.json
 
       - name: Commit version.json
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add version.json
-          git commit -m "Auto-update version to v${{ env.NEW_VERSION }}"
+          git commit -m "Auto-update to versionCode ${{ env.NEW_VCODE }} and versionName ${{ env.NEW_VNAME }}"
           git push
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.NEW_VERSION }}
-          name: Release v${{ env.NEW_VERSION }}
+          tag_name: v${{ env.NEW_VNAME }}
+          name: Release v${{ env.NEW_VNAME }}
           files: release/app-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
