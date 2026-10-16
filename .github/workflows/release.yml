@@ -48,6 +48,7 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add version.json
           git commit -m "Auto-update to versionCode ${{ env.NEW_VCODE }} and versionName ${{ env.NEW_VNAME }}"
+          git pull --rebase origin main
           git push
 
       - name: Create Release
