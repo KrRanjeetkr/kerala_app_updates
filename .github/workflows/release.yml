@@ -19,9 +19,10 @@ jobs:
         id: versioning
         run: |
           CURRENT_VERSION=$(jq -r '.version' version.json)
-          IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
-          NEW_PATCH=$((patch + 1))
-          NEW_VERSION="$major.$minor.$NEW_PATCH"
+          IFS='.' read -r -a parts <<< "$CURRENT_VERSION"
+          last_index=$((${#parts[@]} - 1))
+          parts[$last_index]=$((parts[$last_index] + 1))
+          NEW_VERSION=$(IFS='.'; echo "${parts[*]}")
           echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
       - name: Update version.json
