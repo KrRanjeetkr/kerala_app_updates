@@ -4,6 +4,8 @@ on:
   push:
     branches: [ main ]
     paths: [ 'release/app-release.apk' ]
+  # Manual "Run workflow" button on the Actions page
+  workflow_dispatch:
 
 permissions:
   contents: write
