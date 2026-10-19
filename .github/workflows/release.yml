@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# Run releases one at a time so two quick pushes can't both claim the same version
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   update-and-release:
     runs-on: ubuntu-latest
@@ -17,28 +22,55 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-          ref: main
+          ref: ${{ github.sha }}
 
-      - name: Bump Version
-        id: versioning
+      - name: Read version from APK
         run: |
+          AAPT2=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)/aapt2
+          BADGING=$("$AAPT2" dump badging release/app-release.apk | head -n 1)
+          echo "$BADGING"
+
+          NEW_VCODE=$(echo "$BADGING" | sed -n "s/.* versionCode='\([^']*\)'.*/\1/p")
+          NEW_VNAME=$(echo "$BADGING" | sed -n "s/.* versionName='\([^']*\)'.*/\1/p")
+
+          if ! [[ "$NEW_VCODE" =~ ^[0-9]+$ ]] || [ -z "$NEW_VNAME" ]; then
+            echo "::error::Could not read versionCode/versionName from the APK"
+            exit 1
+          fi
+
           CURRENT_VCODE=$(jq -r '.versionCode' version.json)
-          CURRENT_VNAME=$(jq -r '.versionName' version.json)
-          
-          NEW_VCODE=$((CURRENT_VCODE + 1))
-          
-          IFS='.' read -r -a parts <<< "$CURRENT_VNAME"
-          last_index=$((${#parts[@]} - 1))
-          parts[$last_index]=$((parts[$last_index] + 1))
-          NEW_VNAME=$(IFS='.'; echo "${parts[*]}")
-          
+          if [ "$NEW_VCODE" -le "$CURRENT_VCODE" ]; then
+            echo "::error::APK versionCode $NEW_VCODE must be greater than the published versionCode $CURRENT_VCODE"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v$NEW_VNAME" > /dev/null; then
+            echo "::error::Tag v$NEW_VNAME already exists; bump versionName in the app before releasing"
+            exit 1
+          fi
+
           echo "NEW_VCODE=$NEW_VCODE" >> $GITHUB_ENV
           echo "NEW_VNAME=$NEW_VNAME" >> $GITHUB_ENV
 
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.NEW_VNAME }}
+          name: Release v${{ env.NEW_VNAME }}
+          target_commitish: ${{ github.sha }}
+          files: release/app-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only publish the new version.json once the APK is downloadable
       - name: Update version.json
         run: |
           DOWNLOAD_URL="https://github.com/KrRanjeetkr/kerala_app_updates/releases/download/v${{ env.NEW_VNAME }}/app-release.apk"
-          echo "{\"versionCode\": ${{ env.NEW_VCODE }}, \"versionName\": \"${{ env.NEW_VNAME }}\", \"url\": \"$DOWNLOAD_URL\"}" > version.json
+          jq -n \
+            --argjson code "${{ env.NEW_VCODE }}" \
+            --arg name "${{ env.NEW_VNAME }}" \
+            --arg url "$DOWNLOAD_URL" \
+            '{versionCode: $code, versionName: $name, url: $url}' > version.json
 
       - name: Commit version.json
         run: |
@@ -53,12 +85,3 @@ jobs:
             git rebase origin/main
             git push origin HEAD:main
           fi
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.NEW_VNAME }}
-          name: Release v${{ env.NEW_VNAME }}
-          files: release/app-release.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
